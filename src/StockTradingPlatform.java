@@ -2,6 +2,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.regex.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 // ==================== EVENT SYSTEM ====================
@@ -98,6 +99,18 @@ class TradeExecutedEvent extends TradingEvent {
     public int getQuantity() { return quantity; }
     public String getBuyerId() { return buyerId; }
     public String getSellerId() { return sellerId; }
+}
+
+// Event to ask server for all known symbols
+class AvailableSymbolsRequestEvent extends TradingEvent {}
+
+// Response from server with the list
+class AvailableSymbolsResponseEvent extends TradingEvent {
+    private final List<String> symbols;
+    public AvailableSymbolsResponseEvent(List<String> symbols) {
+        this.symbols = symbols;
+    }
+    public List<String> getSymbols() { return symbols; }
 }
 
 // ==================== INFRASTRUCTURE ====================
@@ -318,6 +331,7 @@ class MarketServer {
     private final Map<String, Double> currentPrices = new ConcurrentHashMap<>();
     private final OrderMatchingEngine matchingEngine;
     private final Set<String> activeSymbols = ConcurrentHashMap.newKeySet();
+    private final List<String> marketDirectory = new CopyOnWriteArrayList<>();
 
     public MarketServer(DistributedEventBus eventBus) {
         this.eventBus = eventBus;
@@ -327,14 +341,55 @@ class MarketServer {
         eventBus.subscribe(DirectOrderEvent.class, this::handleDirectOrder);
         eventBus.subscribe(PriceUpdateEvent.class, e -> currentPrices.put(e.getSymbol(), e.getPrice()));
         eventBus.subscribe(SymbolRequestEvent.class, this::handleSymbolRequest);
+        eventBus.subscribe(AvailableSymbolsRequestEvent.class, this::handleDirectoryRequest);
         
         startDefaultFeeds();
+        initMarketDirectory();
     }
 
     private void startDefaultFeeds() {
         // Start with a few popular ones
         addSymbolTracker("AAPL.US");
         addSymbolTracker("BTCUSDT");
+    }
+
+    private void initMarketDirectory() {
+        new Thread(() -> {
+            System.out.println("SERVER: Fetching full market directory...");
+            // 1. Add popular Stocks (Hardcoded as Stooq doesn't have a simple "list all" API)
+            List<String> stocks = Arrays.asList(
+                "AAPL.US", "MSFT.US", "GOOGL.US", "AMZN.US", "TSLA.US", "NVDA.US", "META.US", 
+                "NFLX.US", "AMD.US", "INTC.US", "F.US", "GM.US", "KO.US", "PEP.US"
+            );
+            marketDirectory.addAll(stocks);
+
+            // 2. Fetch Crypto from Binance
+            try {
+                URL url = new URL("https://api.binance.com/api/v3/ticker/price");
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(url.openStream()))) {
+                    StringBuilder json = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) json.append(line);
+                    
+                    // Simple regex to extract symbols ending in USDT to keep list manageable
+                    Matcher m = Pattern.compile("\"symbol\":\"([^\"]+USDT)\"").matcher(json.toString());
+                    int count = 0;
+                    while (m.find()) {
+                        marketDirectory.add(m.group(1));
+                        count++;
+                        if (count >= 100) break; // Limit to top 100 to avoid UDP packet overflow
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("SERVER: Failed to fetch crypto directory: " + e.getMessage());
+            }
+            System.out.println("SERVER: Directory loaded with " + marketDirectory.size() + " symbols.");
+        }).start();
+    }
+
+    private void handleDirectoryRequest(AvailableSymbolsRequestEvent event) {
+        System.out.println("SERVER: Sending market directory to client.");
+        eventBus.publish(new AvailableSymbolsResponseEvent(new ArrayList<>(marketDirectory)));
     }
 
     private void handleSymbolRequest(SymbolRequestEvent event) {
@@ -440,6 +495,7 @@ class TraderClient implements EventListener<TradingEvent> {
         this.bus = bus;
         bus.subscribe(PriceUpdateEvent.class, this::onPrice);
         bus.subscribe(TradeExecutedEvent.class, this::onTrade);
+        bus.subscribe(AvailableSymbolsResponseEvent.class, this::onDirectory);
     }
 
     private void onPrice(PriceUpdateEvent e) {
@@ -467,6 +523,19 @@ class TraderClient implements EventListener<TradingEvent> {
         }
     }
 
+    private void onDirectory(AvailableSymbolsResponseEvent e) {
+        System.out.println("\n=== AVAILABLE SYMBOLS (SERVER DIRECTORY) ===");
+        List<String> syms = e.getSymbols();
+        Collections.sort(syms);
+        int count = 0;
+        for (String s : syms) {
+            System.out.printf("%-12s", s);
+            if (++count % 6 == 0) System.out.println();
+        }
+        System.out.println("\n============================================");
+        System.out.print("> ");
+    }
+
     public void startInteractive() {
         Scanner scanner = new Scanner(System.in);
         System.out.println("Welcome " + userId + "!");
@@ -482,6 +551,10 @@ class TraderClient implements EventListener<TradingEvent> {
 
             try {
                 switch (cmd) {
+                    case "available":
+                        System.out.println("Requesting symbol list from server...");
+                        bus.publish(new AvailableSymbolsRequestEvent());
+                        break;
                     case "add":
                         if (parts.length < 2) {
                             System.out.println("Usage: add <symbol> (e.g., add NVDA.US or add DOGEUSDT)");
@@ -569,6 +642,7 @@ class TraderClient implements EventListener<TradingEvent> {
                         break;
                     case "help":
                         System.out.println("Commands:");
+                        System.out.println("  available                     (Ask server for list of tradable symbols)");
                         System.out.println("  add <sym>                     (Request server to track a new symbol, e.g., NVDA.US or DOGEUSDT)");
                         System.out.println("  ticker                        (Show current prices for Stocks & Crypto)");
                         System.out.println("  watch                         (Stream live prices - Press Enter to stop)");
@@ -619,24 +693,11 @@ public class StockTradingPlatform {
 
         // 2. MANUAL MODE (Interactive)
         System.out.println("=== DISTRIBUTED STOCK PLATFORM ===");
-        System.out.println("Select Mode:");
-        System.out.println("1. Server (Engine + Market Maker)");
-        System.out.println("2. Client (Trader)");
-        System.out.print("Choice [1/2]: ");
 
         Scanner scanner = new Scanner(System.in);
-        String choice = scanner.nextLine();
-
-        if (choice.equals("1")) {
-            System.out.println("Starting Server...");
-            new MarketServer(bus);
-            System.out.println("Server running. Press Enter to stop.");
-            scanner.nextLine();
-        } else {
-            System.out.print("Enter Username: ");
-            String user = scanner.nextLine();
-            new TraderClient(user, bus).startInteractive();
-        }
+        System.out.print("Enter Username: ");
+        String user = scanner.nextLine();
+        new TraderClient(user, bus).startInteractive();
         
         bus.shutdown();
     }
