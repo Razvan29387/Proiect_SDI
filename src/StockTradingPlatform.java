@@ -214,7 +214,7 @@ class NetworkService {
             try {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
-                try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(packet.getData()))) {
+                try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(packet.getData(), packet.getOffset(), packet.getLength()))) {
                     TradingEvent event = (TradingEvent) ois.readObject();
                     if (event.getOriginNodeId() != null && event.getOriginNodeId().equals(localEventBus.getNodeId())) continue;
                     localEventBus.publishLocally(event);
