@@ -181,7 +181,7 @@ class NetworkService {
         this.port = port;
         this.socket = new MulticastSocket(port);
         this.group = InetAddress.getByName(multicastAddress);
-        
+
         NetworkInterface networkInterface = findBestInterface();
         System.out.println("Network: Binding to interface " + networkInterface.getDisplayName());
 
@@ -279,7 +279,7 @@ class BinanceCryptoFetcher implements PriceFetcher {
             StringBuilder json = new StringBuilder();
             String line;
             while ((line = reader.readLine()) != null) json.append(line);
-            
+
             String jsonStr = json.toString();
             int priceIndex = jsonStr.indexOf("\"price\":\"");
             if (priceIndex != -1) {
@@ -336,13 +336,13 @@ class MarketServer {
     public MarketServer(DistributedEventBus eventBus) {
         this.eventBus = eventBus;
         this.matchingEngine = new OrderMatchingEngine(eventBus);
-        
+
         eventBus.subscribe(OrderEvent.class, matchingEngine);
         eventBus.subscribe(DirectOrderEvent.class, this::handleDirectOrder);
         eventBus.subscribe(PriceUpdateEvent.class, e -> currentPrices.put(e.getSymbol(), e.getPrice()));
         eventBus.subscribe(SymbolRequestEvent.class, this::handleSymbolRequest);
         eventBus.subscribe(AvailableSymbolsRequestEvent.class, this::handleDirectoryRequest);
-        
+
         startDefaultFeeds();
         initMarketDirectory();
     }
@@ -358,8 +358,8 @@ class MarketServer {
             System.out.println("SERVER: Fetching full market directory...");
             // 1. Add popular Stocks (Hardcoded as Stooq doesn't have a simple "list all" API)
             List<String> stocks = Arrays.asList(
-                "AAPL.US", "MSFT.US", "GOOGL.US", "AMZN.US", "TSLA.US", "NVDA.US", "META.US", 
-                "NFLX.US", "AMD.US", "INTC.US", "F.US", "GM.US", "KO.US", "PEP.US"
+                    "AAPL.US", "MSFT.US", "GOOGL.US", "AMZN.US", "TSLA.US", "NVDA.US", "META.US",
+                    "NFLX.US", "AMD.US", "INTC.US", "F.US", "GM.US", "KO.US", "PEP.US"
             );
             marketDirectory.addAll(stocks);
 
@@ -370,7 +370,7 @@ class MarketServer {
                     StringBuilder json = new StringBuilder();
                     String line;
                     while ((line = reader.readLine()) != null) json.append(line);
-                    
+
                     // Simple regex to extract symbols ending in USDT to keep list manageable
                     Matcher m = Pattern.compile("\"symbol\":\"([^\"]+USDT)\"").matcher(json.toString());
                     int count = 0;
@@ -423,7 +423,7 @@ class MarketServer {
         Double price = currentPrices.get(order.getSymbol());
         if (price == null) {
             System.out.println("SERVER: Price not found for " + order.getSymbol());
-            return; 
+            return;
         }
 
         String buyer = order.getType() == DirectOrderEvent.Type.BUY ? order.getUserId() : "BANK";
@@ -452,28 +452,28 @@ class OrderMatchingEngine implements EventListener<OrderEvent> {
         }
     }
 
-    private void match(OrderEvent order, Map<String, PriorityQueue<OrderEvent>> myBook, 
+    private void match(OrderEvent order, Map<String, PriorityQueue<OrderEvent>> myBook,
                        Map<String, PriorityQueue<OrderEvent>> otherBook, boolean isBuy) {
         String sym = order.getSymbol();
-        
+
         myBook.computeIfAbsent(sym, k -> new PriorityQueue<>(
-            isBuy ? (a,b) -> Double.compare(b.getPrice(), a.getPrice()) : Comparator.comparingDouble(OrderEvent::getPrice)
+                isBuy ? (a,b) -> Double.compare(b.getPrice(), a.getPrice()) : Comparator.comparingDouble(OrderEvent::getPrice)
         )).add(order);
-        
+
         PriorityQueue<OrderEvent> buys = buyOrders.get(sym);
         PriorityQueue<OrderEvent> sells = sellOrders.get(sym);
-        
+
         if (buys == null || sells == null) return;
-        
+
         while (!buys.isEmpty() && !sells.isEmpty() && buys.peek().getPrice() >= sells.peek().getPrice()) {
             OrderEvent buy = buys.poll();
             OrderEvent sell = sells.poll();
-            
+
             if (buy.getUserId().equals(sell.getUserId())) break;
 
             double execPrice = (buy.getPrice() + sell.getPrice()) / 2;
             int qty = Math.min(buy.getQuantity(), sell.getQuantity());
-            
+
             bus.publish(new TradeExecutedEvent(sym, execPrice, qty, buy.getUserId(), sell.getUserId()));
         }
     }
@@ -487,7 +487,7 @@ class TraderClient implements EventListener<TradingEvent> {
     private final Map<String, Integer> portfolio = new ConcurrentHashMap<>();
     private double balance = 10000.0;
     private final Map<String, Double> marketPrices = new ConcurrentHashMap<>();
-    
+
     private final AtomicBoolean watching = new AtomicBoolean(false);
 
     public TraderClient(String userId, DistributedEventBus bus) {
@@ -513,13 +513,13 @@ class TraderClient implements EventListener<TradingEvent> {
         if (e.getBuyerId().equals(userId)) {
             balance -= totalValue;
             portfolio.merge(e.getSymbol(), e.getQuantity(), Integer::sum);
-            System.out.printf("%n[+] YOU bought from %s %s %d with %.2f%n> ", 
-                seller, e.getSymbol(), e.getQuantity(), totalValue);
+            System.out.printf("%n[+] YOU bought from %s %s %d with %.2f%n> ",
+                    seller, e.getSymbol(), e.getQuantity(), totalValue);
         } else if (e.getSellerId().equals(userId)) {
             balance += totalValue;
             portfolio.merge(e.getSymbol(), -e.getQuantity(), Integer::sum);
-            System.out.printf("%n[-] YOU sold to %s %s %d with %.2f%n> ", 
-                buyer, e.getSymbol(), e.getQuantity(), totalValue);
+            System.out.printf("%n[-] YOU sold to %s %s %d with %.2f%n> ",
+                    buyer, e.getSymbol(), e.getQuantity(), totalValue);
         }
     }
 
@@ -540,12 +540,12 @@ class TraderClient implements EventListener<TradingEvent> {
         Scanner scanner = new Scanner(System.in);
         System.out.println("Welcome " + userId + "!");
         System.out.println("Type 'help' for commands.");
-        
+
         while (true) {
             System.out.print("> ");
             String line = scanner.nextLine();
             if (line.trim().isEmpty()) continue;
-            
+
             String[] parts = line.trim().split("\\s+");
             String cmd = parts[0].toLowerCase();
 
@@ -623,14 +623,14 @@ class TraderClient implements EventListener<TradingEvent> {
                         System.out.println("--- MARKET SNAPSHOT ---");
                         System.out.println("STOCKS:");
                         marketPrices.entrySet().stream()
-                            .filter(e -> e.getKey().contains("."))
-                            .sorted(Map.Entry.comparingByKey())
-                            .forEach(e -> System.out.printf("  %-10s : %.2f%n", e.getKey(), e.getValue()));
+                                .filter(e -> e.getKey().contains("."))
+                                .sorted(Map.Entry.comparingByKey())
+                                .forEach(e -> System.out.printf("  %-10s : %.2f%n", e.getKey(), e.getValue()));
                         System.out.println("CRYPTO:");
                         marketPrices.entrySet().stream()
-                            .filter(e -> !e.getKey().contains("."))
-                            .sorted(Map.Entry.comparingByKey())
-                            .forEach(e -> System.out.printf("  %-10s : %.2f%n", e.getKey(), e.getValue()));
+                                .filter(e -> !e.getKey().contains("."))
+                                .sorted(Map.Entry.comparingByKey())
+                                .forEach(e -> System.out.printf("  %-10s : %.2f%n", e.getKey(), e.getValue()));
                         System.out.println("-----------------------");
                         break;
                     case "watch":
@@ -698,7 +698,7 @@ public class StockTradingPlatform {
         System.out.print("Enter Username: ");
         String user = scanner.nextLine();
         new TraderClient(user, bus).startInteractive();
-        
+
         bus.shutdown();
     }
 }
