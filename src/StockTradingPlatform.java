@@ -138,6 +138,7 @@ class DistributedEventBus {
         listeners.computeIfAbsent(eventType, k -> new CopyOnWriteArrayList<>()).add(listener);
     }
 
+    @SuppressWarnings("unchecked")
     void publishLocally(TradingEvent event) {
         List<EventListener<? extends TradingEvent>> eventListeners = listeners.get(event.getClass());
         if (eventListeners != null) {
@@ -185,8 +186,11 @@ class NetworkService {
         NetworkInterface networkInterface = findBestInterface();
         System.out.println("Network: Binding to interface " + networkInterface.getDisplayName());
 
+        // FIX: Ensure we send on the same interface we listen on
+        this.socket.setNetworkInterface(networkInterface);
+
         this.socket.joinGroup(new InetSocketAddress(group, port), networkInterface);
-        this.socket.setLoopbackMode(false);
+        this.socket.setOption(StandardSocketOptions.IP_MULTICAST_LOOP, true);
     }
 
     private NetworkInterface findBestInterface() throws SocketException {
@@ -253,7 +257,7 @@ interface PriceFetcher {
 class StooqStockFetcher implements PriceFetcher {
     public double fetchPrice(String symbol) throws Exception {
         String urlStr = "https://stooq.com/q/l/?s=" + symbol + "&f=sd2t2ohlc&h&e=csv";
-        URL url = new URL(urlStr);
+        URL url = URI.create(urlStr).toURL();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(url.openStream()))) {
             String header = reader.readLine();
             String data = reader.readLine();
@@ -274,7 +278,7 @@ class StooqStockFetcher implements PriceFetcher {
 class BinanceCryptoFetcher implements PriceFetcher {
     public double fetchPrice(String symbol) throws Exception {
         String urlStr = "https://api.binance.com/api/v3/ticker/price?symbol=" + symbol;
-        URL url = new URL(urlStr);
+        URL url = URI.create(urlStr).toURL();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(url.openStream()))) {
             StringBuilder json = new StringBuilder();
             String line;
@@ -365,7 +369,7 @@ class MarketServer {
 
             // 2. Fetch Crypto from Binance
             try {
-                URL url = new URL("https://api.binance.com/api/v3/ticker/price");
+                URL url = URI.create("https://api.binance.com/api/v3/ticker/price").toURL();
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(url.openStream()))) {
                     StringBuilder json = new StringBuilder();
                     String line;
@@ -513,13 +517,13 @@ class TraderClient implements EventListener<TradingEvent> {
         if (e.getBuyerId().equals(userId)) {
             balance -= totalValue;
             portfolio.merge(e.getSymbol(), e.getQuantity(), Integer::sum);
-            System.out.printf("%n[+] YOU bought from %s %s %d with %.2f%n> ",
-                    seller, e.getSymbol(), e.getQuantity(), totalValue);
+            System.out.printf("%n[+] YOU bought from %s %s %d (Price/Share: %.2f | Total: %.2f)%n> ",
+                    seller, e.getSymbol(), e.getQuantity(), e.getPrice(), totalValue);
         } else if (e.getSellerId().equals(userId)) {
             balance += totalValue;
             portfolio.merge(e.getSymbol(), -e.getQuantity(), Integer::sum);
-            System.out.printf("%n[-] YOU sold to %s %s %d with %.2f%n> ",
-                    buyer, e.getSymbol(), e.getQuantity(), totalValue);
+            System.out.printf("%n[-] YOU sold to %s %s %d (Price/Share: %.2f | Total: %.2f)%n> ",
+                    buyer, e.getSymbol(), e.getQuantity(), e.getPrice(), totalValue);
         }
     }
 
@@ -570,11 +574,14 @@ class TraderClient implements EventListener<TradingEvent> {
                             break;
                         }
                         if (parts.length < 4) {
-                            System.out.println("Usage: buy <sym> <price> <qty>");
+                            System.out.println("Usage: buy <sym> <qty> <total_value>");
                             break;
                         }
-                        bus.publish(new OrderEvent(userId, parts[1].toUpperCase(), OrderEvent.OrderType.BUY, Double.parseDouble(parts[2]), Integer.parseInt(parts[3])));
-                        System.out.println("Placed Limit Buy Order.");
+                        int buyQty = Integer.parseInt(parts[2]);
+                        double totalBuyPrice = Double.parseDouble(parts[3]);
+                        double buyPricePerShare = totalBuyPrice / buyQty;
+                        bus.publish(new OrderEvent(userId, parts[1].toUpperCase(), OrderEvent.OrderType.BUY, buyPricePerShare, buyQty));
+                        System.out.printf("Placed Limit Buy Order (Unit Price: %.2f).%n", buyPricePerShare);
                         break;
                     case "sell": // P2P
                         if (parts.length > 1 && parts[1].equalsIgnoreCase("direct")) {
@@ -582,17 +589,19 @@ class TraderClient implements EventListener<TradingEvent> {
                             break;
                         }
                         if (parts.length < 4) {
-                            System.out.println("Usage: sell <sym> <price> <qty>");
+                            System.out.println("Usage: sell <sym> <qty> <total_value>");
                             break;
                         }
                         String sellSym = parts[1].toUpperCase();
-                        int sellQty = Integer.parseInt(parts[3]);
+                        int sellQty = Integer.parseInt(parts[2]);
+                        double totalSellPrice = Double.parseDouble(parts[3]);
+                        double sellPricePerShare = totalSellPrice / sellQty;
                         if (portfolio.getOrDefault(sellSym, 0) < sellQty) {
                             System.out.println("⚠️ EROARE: Nu ai suficiente actiuni " + sellSym + " pentru a vinde! (Detii: " + portfolio.getOrDefault(sellSym, 0) + ")");
                             break;
                         }
-                        bus.publish(new OrderEvent(userId, sellSym, OrderEvent.OrderType.SELL, Double.parseDouble(parts[2]), sellQty));
-                        System.out.println("Placed Limit Sell Order.");
+                        bus.publish(new OrderEvent(userId, sellSym, OrderEvent.OrderType.SELL, sellPricePerShare, sellQty));
+                        System.out.printf("Placed Limit Sell Order (Unit Price: %.2f).%n", sellPricePerShare);
                         break;
                     case "buy-direct": // Bank
                         if (parts.length < 3) {
@@ -646,8 +655,8 @@ class TraderClient implements EventListener<TradingEvent> {
                         System.out.println("  add <sym>                     (Request server to track a new symbol, e.g., NVDA.US or DOGEUSDT)");
                         System.out.println("  ticker                        (Show current prices for Stocks & Crypto)");
                         System.out.println("  watch                         (Stream live prices - Press Enter to stop)");
-                        System.out.println("  buy <sym> <price> <qty>       (Trade with other players)");
-                        System.out.println("  sell <sym> <price> <qty>      (Trade with other players)");
+                        System.out.println("  buy <sym> <qty> <total_val>   (Trade with other players)");
+                        System.out.println("  sell <sym> <qty> <total_val>  (Trade with other players)");
                         System.out.println("  buy-direct <sym> <qty>        (Buy from Bank at market price)");
                         System.out.println("  sell-direct <sym> <qty>       (Sell to Bank at market price)");
                         System.out.println("  port                          (Show portfolio)");
